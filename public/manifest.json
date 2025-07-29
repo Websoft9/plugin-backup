@@ -1,0 +1,11 @@
+{
+  "version": "0.2.14",
+  "menu": {
+    "backup": {
+      "label": "Backup",
+      "path": "index.html",
+      "order": 5
+    }
+  },
+  "content-security-policy": "default-src 'unsafe-inline' 'unsafe-eval' *;font-src * data:;style-src 'unsafe-inline' 'unsafe-eval' *;img-src * data:;connect-src http://fc-snapshot-api-jjckkljpbf.cn-hongkong.fcapp.run/DescribeSnapshots *"
+}

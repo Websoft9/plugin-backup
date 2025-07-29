@@ -7,16 +7,109 @@ import MuiAlert from '@mui/material/Alert';
 
 const _ = cockpit.gettext;
 
-// 系统配置常量
-const CONFIG = {
-    MAX_MANUAL_BACKUPS: 2,
-    API_URL: "https://fc-snapshot-api-jjckkljpbf.cn-hongkong-vpc.fcapp.run",
+// 系统配置常量（默认值）
+const DEFAULT_CONFIG = {
+    MAX_MANUAL_BACKUPS: 1,
+    API_BASE_URL_TEMPLATE: "http://{regionId}.fc.websoft9.cn",
     METADATA_BASE_URL: "100.100.100.200",
-    REQUEST_TIMEOUT: 15000
+    REQUEST_TIMEOUT: 15000,
+    EDITION: "Unknown"
 };
+
+// 动态配置对象
+let CONFIG = { ...DEFAULT_CONFIG };
+
+// 配置服务类
+class ConfigService {
+    // 带超时机制的spawn执行方法
+    async executeWithTimeout(script, timeout = 10000) {
+        return new Promise((resolve, reject) => {
+            const timeoutId = setTimeout(() => {
+                reject(new Error(_("Config request timed out")));
+            }, timeout);
+
+            cockpit.spawn(["/bin/bash", "-c", script], { superuser: "try" })
+                .then((result) => {
+                    clearTimeout(timeoutId);
+                    resolve(result);
+                })
+                .catch((error) => {
+                    clearTimeout(timeoutId);
+                    reject(error);
+                });
+        });
+    }
+
+    // 获取websoft9配置
+    async getWebsoft9Config() {
+        try {
+            const script = `docker exec -i websoft9-apphub apphub getconfig --section websoft9_wphosting`;
+            const response = await this.executeWithTimeout(script);
+
+            // 尝试解析JSON响应
+            let configData;
+            try {
+                configData = JSON.parse(response.trim());
+            } catch (parseError) {
+                console.warn("Failed to parse config JSON, using defaults:", parseError);
+                return DEFAULT_CONFIG;
+            }
+
+            // 构建新的配置对象
+            const newConfig = { ...DEFAULT_CONFIG };
+
+            if (configData.edition) {
+                newConfig.EDITION = configData.edition;
+            }
+
+            if (configData.backupcount) {
+                newConfig.MAX_MANUAL_BACKUPS = parseInt(configData.backupcount, 10) || DEFAULT_CONFIG.MAX_MANUAL_BACKUPS;
+            }
+
+            if (configData.fcapiurl) {
+                newConfig.API_BASE_URL_TEMPLATE = `http://{regionId}.${configData.fcapiurl}`;
+            }
+
+            return newConfig;
+        } catch (error) {
+            console.warn("Failed to get websoft9 config, using defaults:", error);
+            return DEFAULT_CONFIG;
+        }
+    }
+
+    // 初始化配置
+    async initializeConfig() {
+        try {
+            const newConfig = await this.getWebsoft9Config();
+            CONFIG = newConfig;
+            console.log("Config initialized:", CONFIG);
+            return CONFIG;
+        } catch (error) {
+            console.warn("Failed to initialize config, using defaults:", error);
+            CONFIG = { ...DEFAULT_CONFIG };
+            return CONFIG;
+        }
+    }
+}
+
+// 创建配置服务实例
+const configService = new ConfigService();
 
 // 公共的API调用工具类
 class SnapshotAPI {
+    // 生成动态API URL
+    async getApiUrl() {
+        try {
+            const metadataService = new MetadataService();
+            const regionId = await metadataService.getRegionId();
+            return CONFIG.API_BASE_URL_TEMPLATE.replace("{regionId}", regionId);
+        } catch (error) {
+            // 如果获取失败，使用默认值
+            console.warn("Failed to get regionId, using default:", error);
+            return CONFIG.API_BASE_URL_TEMPLATE.replace("{regionId}", "cn-hongkong");
+        }
+    }
+
     // 带超时机制的spawn执行方法
     async executeWithTimeout(script, timeout = CONFIG.REQUEST_TIMEOUT) {
         return new Promise((resolve, reject) => {
@@ -39,7 +132,8 @@ class SnapshotAPI {
     // 发送HTTP请求的通用方法
     async request(path, data) {
         try {
-            const script = `curl -s -X POST ${CONFIG.API_URL}${path} \\
+            const apiUrl = await this.getApiUrl();
+            const script = `curl -s -X POST ${apiUrl}${path} \\
                 -H 'Content-Type: application/json' \\
                 -d '${JSON.stringify(data)}'`;
 
@@ -655,21 +749,34 @@ const BackUp = () => {
 
     // 组件加载时获取数据
     useEffect(() => {
-        // 添加超时机制
-        const timeoutId = setTimeout(() => {
-            if (loading) {
-                setError(_("Data fetch timeout"));
+        // 初始化配置并获取数据
+        const initializeAndLoadData = async () => {
+            try {
+                // 先初始化配置
+                await configService.initializeConfig();
+
+                // 添加超时机制
+                const timeoutId = setTimeout(() => {
+                    if (loading) {
+                        setError(_("Data fetch timeout"));
+                        setLoading(false);
+                    }
+                }, CONFIG.REQUEST_TIMEOUT); // 使用配置中的超时时间
+
+                // 然后获取快照数据
+                await getSnapshots();
+                clearTimeout(timeoutId);
+            } catch (error) {
+                console.error("Failed to initialize or load data:", error);
+                setError(_("Failed to initialize application") + `: ${error.message}`);
                 setLoading(false);
             }
-        }, CONFIG.REQUEST_TIMEOUT); // 使用配置中的超时时间
+        };
 
-        getSnapshots().finally(() => {
-            clearTimeout(timeoutId);
-        });
+        initializeAndLoadData();
 
         // 清理函数
         return () => {
-            clearTimeout(timeoutId);
             stopProgressPolling(); // 组件卸载时停止轮询
         };
     }, []);
